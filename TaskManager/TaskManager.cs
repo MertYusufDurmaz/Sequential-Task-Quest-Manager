@@ -2,24 +2,35 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.Events;
 
 public class TaskManager : MonoBehaviour
 {
     public static TaskManager Instance { get; private set; }
 
+    // Struct yerine Class kullandık (Referans tipli olduğu için Dictionary güncellemeleri çok daha kolay olur)
     [System.Serializable]
-    public struct Task
+    public class Task
     {
         public string taskId;
-        public string taskMessage;
+        [TextArea] public string taskMessage;
         public bool isCompleted;
+        [Tooltip("Bu görev bittiğinde otomatik başlayacak sıradaki görev (Boş bırakılabilir)")]
         public string nextTaskId;
     }
 
+    [Header("Task Database")]
     [SerializeField] private List<Task> tasks = new List<Task>();
     private Dictionary<string, Task> taskDictionary = new Dictionary<string, Task>();
 
+    [Header("Settings")]
     [SerializeField] private string mainMenuSceneName = "MainMenu";
+    [Tooltip("Yeni oyuna başlandığında verilecek ilk görev")]
+    [SerializeField] private string startingTaskId = "task_find_flashlight";
+
+    [Header("Events")]
+    public UnityEvent<string> onTaskStarted;
+    public UnityEvent<string> onTaskCompleted;
 
     void Awake()
     {
@@ -28,7 +39,11 @@ public class TaskManager : MonoBehaviour
             Instance = this;
             DontDestroyOnLoad(gameObject);
         }
-        else { Destroy(gameObject); return; }
+        else 
+        { 
+            Destroy(gameObject); 
+            return; 
+        }
 
         InitializeTaskDictionary(false);
     }
@@ -40,40 +55,43 @@ public class TaskManager : MonoBehaviour
     {
         if (scene.name == mainMenuSceneName)
         {
-            if (NotificationManager.Instance != null) NotificationManager.Instance.ForceCloseAllNotifications();
+            if (NotificationManager.Instance != null) 
+                NotificationManager.Instance.ForceCloseAllNotifications();
             return;
         }
 
-        // G�revleri s�f�rla
         InitializeTaskDictionary(true);
 
-        // G�rev kontrol s�recini ba�lat
         StopAllCoroutines();
         StartCoroutine(CheckAndStartQuests());
     }
 
     private IEnumerator CheckAndStartQuests()
     {
+        // SaveManager'ın yüklenmesi için ufak bir esneme payı
         yield return new WaitForSeconds(0.2f);
 
         if (SceneManager.GetActiveScene().name != mainMenuSceneName)
         {
-            if (GameSaveManager.Instance != null && GameSaveManager.Instance.isGameLoadedFromSave)
+            // Eğer oyun save dosyasından YÜKLENMEDİYSE ilk görevi ver
+            if (GameSaveManager.Instance == null || !GameSaveManager.Instance.isGameLoadedFromSave)
             {
-                Debug.Log("Save y�klendi, ba�lang�� g�revi TaskManager taraf�ndan atland�.");
+                Debug.Log("Yeni oyun veya Restart: Başlangıç görevleri veriliyor.");
+                StartInitialQuests();
             }
             else
             {
-                Debug.Log("Yeni oyun veya Restart: Ba�lang�� g�revleri veriliyor.");
-                StartInitialQuests();
+                Debug.Log("Save yüklendi, başlangıç görevi atlandı.");
             }
         }
     }
 
     private void StartInitialQuests()
     {
-        if (NotificationManager.Instance == null) return;
-        TriggerTask("task_find_flashlight");
+        if (!string.IsNullOrEmpty(startingTaskId))
+        {
+            TriggerTask(startingTaskId);
+        }
     }
 
     private void InitializeTaskDictionary(bool resetCompletionStatus)
@@ -81,12 +99,13 @@ public class TaskManager : MonoBehaviour
         taskDictionary.Clear();
         foreach (Task task in tasks)
         {
-            Task currentTask = task;
-            if (resetCompletionStatus) currentTask.isCompleted = false;
-            taskDictionary[currentTask.taskId] = currentTask;
+            if (resetCompletionStatus) task.isCompleted = false;
+            taskDictionary[task.taskId] = task;
         }
     }
 
+    // --- SAVE SİSTEMİ İÇİN METOTLAR ---
+    
     public List<string> GetCompletedTasks()
     {
         List<string> completed = new List<string>();
@@ -104,12 +123,10 @@ public class TaskManager : MonoBehaviour
 
         foreach (string id in loadedTaskIds)
         {
-            if (taskDictionary.ContainsKey(id))
+            if (taskDictionary.TryGetValue(id, out Task t))
             {
-                Task t = taskDictionary[id];
-                t.isCompleted = true;
-                taskDictionary[id] = t;
-
+                t.isCompleted = true; // Class olduğu için direkt referansı günceller
+                
                 if (!string.IsNullOrEmpty(t.nextTaskId))
                 {
                     lastActiveTaskId = t.nextTaskId;
@@ -117,57 +134,65 @@ public class TaskManager : MonoBehaviour
             }
         }
 
-        if (!string.IsNullOrEmpty(lastActiveTaskId) && taskDictionary.ContainsKey(lastActiveTaskId))
+        // En son tamamlanan görevin bir devamı varsa onu aktif et
+        if (!string.IsNullOrEmpty(lastActiveTaskId) && taskDictionary.TryGetValue(lastActiveTaskId, out Task activeTask))
         {
-            Task activeTask = taskDictionary[lastActiveTaskId];
             if (!activeTask.isCompleted && NotificationManager.Instance != null)
             {
                 NotificationManager.Instance.ShowNotification(NotificationType.GorevHatirlatma, activeTask.taskMessage);
             }
         }
-        else if (loadedTaskIds.Count == 0)
+        // Eğer hiç görev yüklenmediyse ilk görevi ver
+        else if (loadedTaskIds.Count == 0 && tasks.Count > 0)
         {
-            if (NotificationManager.Instance != null)
-                NotificationManager.Instance.ShowNotification(NotificationType.GorevHatirlatma, tasks[0].taskMessage);
+            TriggerTask(startingTaskId);
         }
     }
 
-    // --- YEN� EKLENEN YARDIMCI METOT ---
     public string GetTaskBaseMessage(string taskId)
     {
-        if (taskDictionary.ContainsKey(taskId))
+        if (taskDictionary.TryGetValue(taskId, out Task task))
         {
-            return taskDictionary[taskId].taskMessage;
+            return task.taskMessage;
         }
         return "";
     }
-    // -----------------------------------
+
+    // --- OYUN İÇİ GÖREV KONTROLLERİ ---
 
     public void TriggerTask(string taskId)
     {
         if (SceneManager.GetActiveScene().name == mainMenuSceneName) return;
 
-        if (taskDictionary.ContainsKey(taskId) && !taskDictionary[taskId].isCompleted)
+        if (taskDictionary.TryGetValue(taskId, out Task task) && !task.isCompleted)
         {
-            Task task = taskDictionary[taskId];
             if (NotificationManager.Instance != null)
+            {
                 NotificationManager.Instance.ShowNotification(NotificationType.GorevHatirlatma, task.taskMessage);
+            }
+            
+            onTaskStarted?.Invoke(taskId);
         }
     }
 
     public void CompleteTask(string taskId)
     {
-        if (taskDictionary.ContainsKey(taskId) && !taskDictionary[taskId].isCompleted)
+        if (taskDictionary.TryGetValue(taskId, out Task task) && !task.isCompleted)
         {
-            Task task = taskDictionary[taskId];
-            task.isCompleted = true;
-            taskDictionary[taskId] = task;
+            task.isCompleted = true; // Class kullandığımız için Dictionary otomatik güncellendi.
 
             if (NotificationManager.Instance != null)
+            {
                 NotificationManager.Instance.CloseTaskNotification(task.taskMessage);
+            }
 
+            onTaskCompleted?.Invoke(taskId);
+
+            // Zincirleme görev sistemi: Bu bittiyse sıradakini başlat
             if (!string.IsNullOrEmpty(task.nextTaskId))
+            {
                 TriggerTask(task.nextTaskId);
+            }
         }
     }
 }
